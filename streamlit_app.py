@@ -28,7 +28,8 @@ import streamlit as st
 HERE = pathlib.Path(__file__).resolve().parent
 PROMPT_FILE = HERE / "sistema.md"
 EMB_FILE = HERE / "embeddings.npy"
-CORPUS_FILE = HERE / "corpus.jsonl"
+CORPUS_FILE = HERE / "corpus.jsonl"          # texto plano (solo en local, opcional)
+CORPUS_ENC_FILE = HERE / "corpus.jsonl.enc"  # corpus cifrado (el que va al repo)
 LOG_PATH = HERE / "registro.jsonl"
 
 DEFAULT_K = 6
@@ -52,17 +53,29 @@ MAX_OUTPUT_TOKENS = int(cfg("MAX_OUTPUT_TOKENS", "3000") or "3000")
 
 # ------------------------------ Carga cacheada --------------------------------
 
+def _leer_corpus_bytes():
+    """Devuelve el corpus.jsonl en bytes: texto plano si existe (local), o
+    descifrando corpus.jsonl.enc con la clave APP_DATA_KEY de los Secrets."""
+    if CORPUS_FILE.exists():
+        return CORPUS_FILE.read_bytes()
+    clave = cfg("APP_DATA_KEY")
+    if not clave:
+        raise RuntimeError(
+            "Falta APP_DATA_KEY en los Secrets para descifrar el corpus.")
+    from cryptography.fernet import Fernet
+    return Fernet(clave.encode()).decrypt(CORPUS_ENC_FILE.read_bytes())
+
+
 @st.cache_resource(show_spinner="Cargando el corpus…")
 def cargar_corpus():
     emb = np.load(EMB_FILE)
     textos, metas = [], []
-    with open(CORPUS_FILE, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                rec = json.loads(line)
-                textos.append(rec["text"])
-                metas.append(rec["meta"])
+    for line in _leer_corpus_bytes().decode("utf-8").splitlines():
+        line = line.strip()
+        if line:
+            rec = json.loads(line)
+            textos.append(rec["text"])
+            metas.append(rec["meta"])
     return emb, textos, metas
 
 

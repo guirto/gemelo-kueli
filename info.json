@@ -1,0 +1,7 @@
+{
+  "n": 2720,
+  "dim": 1024,
+  "modelo_embeddings": "voyage-4",
+  "espacio": "cosine",
+  "normalizado": true
+}

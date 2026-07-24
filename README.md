@@ -87,13 +87,67 @@ streamlit run streamlit_app.py
 - Guarda la `APP_DATA_KEY` solo donde tú controles (gestor de contraseñas y los
   Secrets de Streamlit). No la pongas en el repo ni la compartas con los testers.
 
-## Registro y notas
+## Parámetros (solo desde Secrets, no desde la web)
 
-- Cada interacción se guarda en `registro.jsonl`, descargable en **CSV** desde la
-  barra lateral. El disco de Streamlit gratis es **efímero**: descarga el CSV al
-  terminar cada sesión. (Si quieres registro central permanente, se puede
-  conectar a Google Sheets.)
-- Cada consulta gasta API de pago (~1–2 céntimos). Deja `APP_PASSWORD` puesta y
-  fija límites de gasto en Anthropic y Voyage.
+La web ya **no** muestra sliders: `k` y umbral se fijan desde los Secrets, para
+que los testers no los toquen. Son opcionales (por defecto 6 y 0.40):
+
+```toml
+TOP_K = "6"       # nº de fragmentos a recuperar
+UMBRAL = "0.40"   # umbral de similitud mínima
+```
+
+## Registro permanente en Google Sheets (recomendado)
+
+Por defecto el registro se guarda en `registro.jsonl` (descargable en CSV desde
+la barra lateral), pero el disco de Streamlit gratis es **efímero** y se pierde
+al reiniciar. Para un registro central que no se pierde nunca —y para que la app
+**reutilice respuestas ya dadas** (si una pregunta ya se contestó, la lee de la
+hoja y no vuelve a gastar API)— conéctala a Google Sheets:
+
+1. **Crea una hoja de cálculo** en Google Sheets (vacía). Copia su **ID**: en la
+   URL, lo que va entre `/d/` y `/edit`.
+2. **Crea una cuenta de servicio** en Google Cloud:
+   - Ve a https://console.cloud.google.com → crea un proyecto (o usa uno).
+   - *APIs y servicios → Biblioteca* → busca **Google Sheets API** → *Habilitar*.
+   - *APIs y servicios → Credenciales* → *Crear credenciales* → *Cuenta de
+     servicio*. Ponle nombre y créala.
+   - En la cuenta creada → pestaña *Claves* → *Agregar clave* → *Crear clave
+     nueva* → **JSON**. Se descarga un fichero JSON.
+3. **Comparte la hoja** con la cuenta de servicio: abre el JSON, copia el
+   `client_email` (algo como `...@...iam.gserviceaccount.com`), y en tu Google
+   Sheet pulsa *Compartir* y dale acceso de **Editor** a ese correo.
+4. **Pega las credenciales en los Secrets de Streamlit** (Settings → Secrets),
+   añadiendo el ID de la hoja y el JSON como tabla `[gcp_service_account]`:
+
+   ```toml
+   GSHEET_ID = "el-id-de-tu-hoja"
+
+   [gcp_service_account]
+   type = "service_account"
+   project_id = "..."
+   private_key_id = "..."
+   private_key = "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+   client_email = "...@...iam.gserviceaccount.com"
+   client_id = "..."
+   auth_uri = "https://accounts.google.com/o/oauth2/auth"
+   token_uri = "https://oauth2.googleapis.com/token"
+   auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
+   client_x509_cert_url = "..."
+   ```
+   (Copia cada campo del JSON descargado. El `private_key` va con las `\n` tal
+   cual aparecen en el JSON.)
+5. **Reinicia la app** (*Manage app → Reboot*). A partir de ahí, cada pregunta se
+   guarda en la hoja, y si alguien repite una pregunta ya contestada, la app
+   muestra la respuesta guardada sin llamar a las APIs.
+
+Si no configuras esto, la app funciona igual pero solo con el registro local
+efímero (descarga el CSV al terminar cada sesión).
+
+## Notas
+
+- Cada consulta nueva gasta API de pago (~1–2 céntimos); las repetidas, si tienes
+  Google Sheets, son gratis. Deja `APP_PASSWORD` puesta y fija límites de gasto
+  en Anthropic y Voyage.
 - Para actualizar el corpus: se regenera el índice, se re-exportan y se vuelve a
   cifrar `corpus.jsonl` → `corpus.jsonl.enc`, y se sube al repo.

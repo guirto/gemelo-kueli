@@ -3,3 +3,5 @@ numpy>=1.24
 voyageai>=0.3.0
 anthropic>=0.40.0
 cryptography>=42.0
+gspread>=6.0
+google-auth>=2.30

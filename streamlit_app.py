@@ -32,9 +32,6 @@ CORPUS_FILE = HERE / "corpus.jsonl"          # texto plano (solo en local, opcio
 CORPUS_ENC_FILE = HERE / "corpus.jsonl.enc"  # corpus cifrado (el que va al repo)
 LOG_PATH = HERE / "registro.jsonl"
 
-DEFAULT_K = 6
-DEFAULT_THRESHOLD = 0.40
-
 
 def cfg(nombre, defecto=""):
     """Lee de st.secrets primero y, si no, de variables de entorno."""
@@ -49,6 +46,11 @@ def cfg(nombre, defecto=""):
 VOYAGE_MODEL = cfg("VOYAGE_MODEL", "voyage-4")
 CLAUDE_MODEL = cfg("CLAUDE_MODEL", "claude-sonnet-5")
 MAX_OUTPUT_TOKENS = int(cfg("MAX_OUTPUT_TOKENS", "3000") or "3000")
+
+# Parámetros de recuperación: configurables SOLO desde los Secrets/entorno
+# (TOP_K y UMBRAL), no desde la web. Valores por defecto: 6 y 0.40.
+DEFAULT_K = int(cfg("TOP_K", "6") or "6")
+DEFAULT_THRESHOLD = float(cfg("UMBRAL", "0.40") or "0.40")
 
 
 # ------------------------------ Carga cacheada --------------------------------
@@ -189,6 +191,68 @@ def registro_csv_bytes():
     return buf.getvalue().encode("utf-8-sig")
 
 
+# ------------------------------ Google Sheets (registro + caché) --------------
+
+GSHEET_ID = cfg("GSHEET_ID")
+CABECERA_GS = ["fecha_utc", "clave", "pregunta", "respuesta", "fuentes",
+               "n_chunks", "fuera_de_corpus"]
+
+
+def normaliza(q):
+    """Clave normalizada para detectar preguntas repetidas."""
+    return " ".join((q or "").lower().split()).strip(" ¿?¡!.,;:")
+
+
+@st.cache_resource(show_spinner=False)
+def gsheet_ws():
+    """Devuelve la hoja de cálculo de Google (o None si no está configurada)."""
+    if not GSHEET_ID:
+        return None
+    try:
+        import gspread
+        from google.oauth2.service_account import Credentials
+        info = dict(st.secrets["gcp_service_account"])
+        scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+        creds = Credentials.from_service_account_info(info, scopes=scopes)
+        gc = gspread.authorize(creds)
+        ws = gc.open_by_key(GSHEET_ID).sheet1
+        if not ws.get_all_values():
+            ws.append_row(CABECERA_GS)
+        return ws
+    except Exception as e:
+        print(f"[gsheets] no disponible: {type(e).__name__}: {e}")
+        return None
+
+
+def gs_buscar(clave):
+    """Si la pregunta ya se contestó, devuelve {respuesta, fuentes}; si no, None."""
+    ws = gsheet_ws()
+    if not ws:
+        return None
+    try:
+        for fila in ws.get_all_records():
+            if str(fila.get("clave", "")) == clave:
+                fuentes = [s.strip() for s in str(fila.get("fuentes", "")).split("|") if s.strip()]
+                return {"respuesta": str(fila.get("respuesta", "")), "fuentes": fuentes}
+    except Exception as e:
+        print(f"[gsheets] lectura falló: {type(e).__name__}: {e}")
+    return None
+
+
+def gs_registrar(fila):
+    ws = gsheet_ws()
+    if not ws:
+        return
+    try:
+        ws.append_row(
+            [fila["ts"], fila["clave"], fila["pregunta"], fila["respuesta"],
+             " | ".join(fila["fuentes"]), fila["n_chunks"],
+             "sí" if fila["fallback"] else "no"],
+            value_input_option="RAW")
+    except Exception as e:
+        print(f"[gsheets] escritura falló: {type(e).__name__}: {e}")
+
+
 # ------------------------------ Interfaz --------------------------------------
 
 st.set_page_config(page_title="Gemelo Digital · Javier Díaz-Giménez", page_icon="🧠")
@@ -226,10 +290,7 @@ st.caption(
 )
 
 with st.sidebar:
-    st.header("Ajustes")
-    k = st.slider("Fragmentos a recuperar (k)", 1, 12, DEFAULT_K)
-    umbral = st.slider("Umbral de similitud", 0.0, 0.9, DEFAULT_THRESHOLD, 0.05)
-    st.divider()
+    st.header("Registro")
     st.download_button("⬇️ Descargar registro (CSV)", data=registro_csv_bytes(),
                        file_name="registro_gemelo.csv", mime="text/csv")
 
@@ -252,12 +313,24 @@ if pregunta:
         st.markdown(pregunta)
 
     with st.chat_message("assistant"):
-        if faltan:
+        clave = normaliza(pregunta)
+        cacheada = gs_buscar(clave)
+        if cacheada:
+            # Ya se había preguntado: se reutiliza sin llamar a las APIs.
+            salida = cacheada["respuesta"]
+            if cacheada["fuentes"]:
+                salida += "\n\n---\n**Fuentes recuperadas del corpus:**\n"
+                for t in cacheada["fuentes"]:
+                    salida += f"- {t}\n"
+            salida += "\n\n_↺ Respuesta recuperada del registro (ya se había preguntado antes)._"
+            st.markdown(salida)
+            st.session_state.messages.append({"role": "assistant", "content": salida})
+        elif faltan:
             st.error("No puedo responder: faltan las claves de API.")
         else:
             with st.spinner("Pensando…"):
                 try:
-                    res = ask(pregunta, emb, textos, metas, k=k, threshold=umbral)
+                    res = ask(pregunta, emb, textos, metas, k=DEFAULT_K, threshold=DEFAULT_THRESHOLD)
                     salida = res["answer"]
                     if not res["fallback"] and res["sources"]:
                         salida += "\n\n---\n**Fuentes recuperadas del corpus:**\n"
@@ -266,13 +339,16 @@ if pregunta:
                             salida += f"- {s['titulo']} *[{s['tipo']}]*{fecha}  ·  sim={s['sim']}\n"
                     st.markdown(salida)
                     st.session_state.messages.append({"role": "assistant", "content": salida})
-                    log_interaction({
+                    registro = {
                         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                        "clave": clave,
                         "pregunta": pregunta,
                         "respuesta": res["answer"],
                         "fuentes": [s["titulo"] for s in res["sources"]],
                         "n_chunks": res["n_chunks"],
                         "fallback": res["fallback"],
-                    })
+                    }
+                    log_interaction(registro)   # copia local (efímera)
+                    gs_registrar(registro)      # registro permanente en Google Sheets
                 except Exception as e:
                     st.error(f"Error al consultar el gemelo: {type(e).__name__}: {e}")

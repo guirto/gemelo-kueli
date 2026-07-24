@@ -269,8 +269,33 @@ def gs_registrar(fila):
              " | ".join(fila["fuentes"]), fila["n_chunks"],
              "sí" if fila["fallback"] else "no"],
             value_input_option="RAW")
+        gs_listar.clear()  # refresca la lista del lateral
     except Exception as e:
         print(f"[gsheets] escritura falló: {type(e).__name__}: {e}")
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def gs_listar():
+    """Lista (sin repetidas) de preguntas ya registradas en la hoja."""
+    ws = gsheet_ws()
+    if not ws:
+        return []
+    try:
+        registros = ws.get_all_records()
+    except Exception as e:
+        print(f"[gsheets] listado falló: {type(e).__name__}: {e}")
+        return []
+    vistos, salida = set(), []
+    for r in registros:
+        clave = str(r.get("clave", ""))
+        preg = str(r.get("pregunta", "")).strip()
+        if not preg or clave in vistos:
+            continue
+        vistos.add(clave)
+        fuentes = [s.strip() for s in str(r.get("fuentes", "")).split("|") if s.strip()]
+        salida.append({"pregunta": preg, "respuesta": str(r.get("respuesta", "")),
+                       "fuentes": fuentes})
+    return salida
 
 
 # ------------------------------ Interfaz --------------------------------------
@@ -318,6 +343,21 @@ def _hay_config_gs():
         return False
 
 
+st.session_state.setdefault("messages", [])
+
+
+def _mostrar_del_registro(item):
+    """Vuelca al chat una pregunta ya registrada y su respuesta."""
+    salida = item["respuesta"]
+    if item["fuentes"]:
+        salida += "\n\n---\n**Fuentes recuperadas del corpus:**\n"
+        for t in item["fuentes"]:
+            salida += f"- {t}\n"
+    salida += "\n\n_↺ Respuesta recuperada del registro._"
+    st.session_state.messages.append({"role": "user", "content": item["pregunta"]})
+    st.session_state.messages.append({"role": "assistant", "content": salida})
+
+
 with st.sidebar:
     st.header("Registro")
     st.download_button("⬇️ Descargar registro (CSV)", data=registro_csv_bytes(),
@@ -335,13 +375,24 @@ with st.sidebar:
             st.caption("🔴 Google Sheets no conecta. Abre la app con `?debug=1` "
                        "al final de la URL para ver el motivo.")
 
+    # Lista de preguntas ya respondidas (pulsables)
+    if gsheet_ws() is not None:
+        preguntas = gs_listar()
+        st.divider()
+        with st.expander("📋 Preguntas ya respondidas", expanded=False):
+            if not preguntas:
+                st.caption("Aún no hay preguntas registradas.")
+            for i, item in enumerate(preguntas):
+                etiqueta = item["pregunta"]
+                if len(etiqueta) > 60:
+                    etiqueta = etiqueta[:57] + "…"
+                if st.button(etiqueta, key=f"reg_{i}", use_container_width=True):
+                    _mostrar_del_registro(item)
+
 faltan = [k2 for k2, v in (("VOYAGE_API_KEY", cfg("VOYAGE_API_KEY")),
                            ("ANTHROPIC_API_KEY", cfg("ANTHROPIC_API_KEY"))) if not v]
 if faltan:
     st.warning("Faltan claves en los *Secrets* de la app: " + ", ".join(faltan))
-
-if "messages" not in st.session_state:
-    st.session_state.messages = []
 
 for m in st.session_state.messages:
     with st.chat_message(m["role"]):

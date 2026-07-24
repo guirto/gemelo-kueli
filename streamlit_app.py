@@ -203,11 +203,28 @@ def normaliza(q):
     return " ".join((q or "").lower().split()).strip(" ¿?¡!.,;:")
 
 
+def _extraer_id(valor):
+    """Acepta el ID de la hoja o la URL completa y devuelve el ID."""
+    valor = (valor or "").strip()
+    if "/d/" in valor:
+        valor = valor.split("/d/", 1)[1].split("/", 1)[0]
+    return valor
+
+
 @st.cache_resource(show_spinner=False)
 def gsheet_ws():
     """Devuelve la hoja de cálculo de Google (o None si no está configurada)."""
+    ok, ws, _ = _conectar_gsheets()
+    return ws if ok else None
+
+
+def _conectar_gsheets():
+    """Intenta conectar. Devuelve (ok, worksheet|None, mensaje)."""
     if not GSHEET_ID:
-        return None
+        return (False, None,
+                "No hay GSHEET_ID en los Secrets (revisa que esté ANTES de la "
+                "sección [gcp_service_account]; en TOML las claves sueltas van "
+                "siempre antes de cualquier [tabla]).")
     try:
         import gspread
         from google.oauth2.service_account import Credentials
@@ -215,13 +232,16 @@ def gsheet_ws():
         scopes = ["https://www.googleapis.com/auth/spreadsheets"]
         creds = Credentials.from_service_account_info(info, scopes=scopes)
         gc = gspread.authorize(creds)
-        ws = gc.open_by_key(GSHEET_ID).sheet1
+        sh = gc.open_by_key(_extraer_id(GSHEET_ID))
+        ws = sh.sheet1
         if not ws.get_all_values():
             ws.append_row(CABECERA_GS)
-        return ws
+        return (True, ws, f"Conectado a la hoja «{sh.title}».")
+    except KeyError:
+        return (False, None,
+                "Falta la sección [gcp_service_account] en los Secrets.")
     except Exception as e:
-        print(f"[gsheets] no disponible: {type(e).__name__}: {e}")
-        return None
+        return (False, None, f"{type(e).__name__}: {e}")
 
 
 def gs_buscar(clave):
@@ -289,10 +309,31 @@ st.caption(
     "Las preguntas y respuestas se registran para su revisión."
 )
 
+def _hay_config_gs():
+    if GSHEET_ID:
+        return True
+    try:
+        return "gcp_service_account" in st.secrets
+    except Exception:
+        return False
+
+
 with st.sidebar:
     st.header("Registro")
     st.download_button("⬇️ Descargar registro (CSV)", data=registro_csv_bytes(),
                        file_name="registro_gemelo.csv", mime="text/csv")
+
+    # Estado de Google Sheets (diagnóstico)
+    _debug = st.query_params.get("debug") == "1"
+    if _debug:
+        ok, _ws, msg = _conectar_gsheets()
+        (st.success if ok else st.error)(f"Google Sheets — {msg}")
+    elif _hay_config_gs():
+        if gsheet_ws() is not None:
+            st.caption("🟢 Registro en Google Sheets activo")
+        else:
+            st.caption("🔴 Google Sheets no conecta. Abre la app con `?debug=1` "
+                       "al final de la URL para ver el motivo.")
 
 faltan = [k2 for k2, v in (("VOYAGE_API_KEY", cfg("VOYAGE_API_KEY")),
                            ("ANTHROPIC_API_KEY", cfg("ANTHROPIC_API_KEY"))) if not v]
